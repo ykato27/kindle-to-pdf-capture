@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import get_config_from_env, get_default_config
 from .converter import KindleToPdfConverter
 from .logger import setup_logger
-from .utils import create_output_directory
+from .utils import create_output_directory, get_onedrive_desktop_path
 
 logger = setup_logger("kindle_to_pdf")
 
@@ -23,6 +23,22 @@ def print_header() -> None:
     print()
 
 
+def get_default_output_dir() -> Path:
+    """
+    デフォルト出力ディレクトリを取得
+    OneDriveデスクトップを優先、なければカレントディレクトリ
+
+    Returns:
+        出力ディレクトリパス
+    """
+    onedrive_path = get_onedrive_desktop_path()
+    if onedrive_path and onedrive_path.exists():
+        return onedrive_path
+
+    # フォールバック: カレントディレクトリ
+    return Path.cwd()
+
+
 def get_user_input() -> tuple[str, Path]:
     """
     ユーザー入力を取得
@@ -30,15 +46,18 @@ def get_user_input() -> tuple[str, Path]:
     Returns:
         (本のタイトル, 出力ディレクトリ)の タプル
     """
+    default_output = get_default_output_dir()
+
     # 出力ディレクトリの指定
     print("出力先フォルダを指定してください。")
-    print("（デフォルト: カレントディレクトリ）")
+    print(f"（デフォルト: {default_output}）")
     output_dir_input = input("出力先フォルダ [デフォルト]: ").strip()
 
     if output_dir_input:
         output_dir = create_output_directory(Path(output_dir_input))
     else:
-        output_dir = create_output_directory(None)
+        output_dir = create_output_directory(default_output)
+        logger.info(f"デフォルト出力ディレクトリを使用: {output_dir}")
 
     # 本のタイトル入力
     print()

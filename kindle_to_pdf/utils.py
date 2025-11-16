@@ -86,3 +86,44 @@ def get_pdf_filename(book_title: str, output_dir: Path) -> Path:
     safe_title = sanitize_filename(book_title)
     pdf_path = output_dir / f"{safe_title}.pdf"
     return pdf_path
+
+
+def get_onedrive_desktop_path():
+    """
+    OneDriveデスクトップのパスを取得
+
+    Returns:
+        OneDriveデスクトップパス、見つからない場合はNone
+    """
+    import os
+    
+    try:
+        # ユーザーホームディレクトリを取得
+        home = Path.home()
+
+        # OneDrive フォルダを探す
+        # パターン1: OneDrive - 会社名\デスクトップ
+        onedrive_parent = home.parent
+        for item in onedrive_parent.iterdir():
+            if item.is_dir() and "OneDrive" in item.name:
+                desktop = item / "デスクトップ"
+                if desktop.exists():
+                    return desktop
+
+        # パターン2: OneDrive\デスクトップ
+        onedrive_simple = home / "OneDrive"
+        if onedrive_simple.exists():
+            desktop_simple = onedrive_simple / "デスクトップ"
+            if desktop_simple.exists():
+                return desktop_simple
+
+        # パターン3: 環境変数から取得
+        if os.getenv("ONEDRIVE"):
+            onedrive_env = Path(os.getenv("ONEDRIVE")) / "デスクトップ"
+            if onedrive_env.exists():
+                return onedrive_env
+
+        return None
+
+    except Exception:
+        return None
