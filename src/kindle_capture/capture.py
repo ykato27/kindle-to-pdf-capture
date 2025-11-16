@@ -78,10 +78,11 @@ def capture_pages(config: dict) -> None:
     screen_width, screen_height = pyautogui.size()
 
     # Determine click position based on navigation method
+    # Use positions away from screen edges to avoid PyAutoGUI fail-safe
     if page_navigation == "click_right":
-        click_x = int(screen_width * 0.9)  # 90% from left (right side)
+        click_x = int(screen_width * 0.75)  # 75% from left (right side)
     else:  # click_left
-        click_x = int(screen_width * 0.1)  # 10% from left (left side)
+        click_x = int(screen_width * 0.25)  # 25% from left (left side)
 
     click_y = int(screen_height * 0.5)  # Middle of screen vertically
 
