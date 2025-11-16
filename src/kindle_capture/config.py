@@ -5,10 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-PAGE_KEY_CHOICES = {
-    "R": "right",
-    "L": "left",
-    "P": "pagedown",
+PAGE_NAVIGATION_CHOICES = {
+    "R": "click_right",
+    "L": "click_left",
 }
 
 
@@ -38,12 +37,12 @@ def get_config_from_user() -> dict:
         total_pages_input = _prompt("How many pages to capture?", default="1")
     total_pages = int(total_pages_input)
 
-    print("Select page navigation key: R (Right Arrow), L (Left Arrow), P (PageDown)")
-    page_key_choice = _prompt("Choose navigation key", default="R").upper()
-    while page_key_choice not in PAGE_KEY_CHOICES:
-        print("Invalid choice. Please select R, L, or P.")
-        page_key_choice = _prompt("Choose navigation key", default="R").upper()
-    page_key = PAGE_KEY_CHOICES[page_key_choice]
+    print("Select page navigation method: R (Click Right side), L (Click Left side)")
+    page_nav_choice = _prompt("Choose navigation method", default="R").upper()
+    while page_nav_choice not in PAGE_NAVIGATION_CHOICES:
+        print("Invalid choice. Please select R or L.")
+        page_nav_choice = _prompt("Choose navigation method", default="R").upper()
+    page_navigation = PAGE_NAVIGATION_CHOICES[page_nav_choice]
 
     capture_interval_input = _prompt(
         "Delay after screenshot in seconds", default="0.5"
@@ -68,7 +67,7 @@ def get_config_from_user() -> dict:
     return {
         "book_name": book_name,
         "total_pages": total_pages,
-        "page_key": page_key,
+        "page_navigation": page_navigation,
         "images_dir": images_dir,
         "output_pdf": output_pdf,
         "capture_interval": capture_interval,
