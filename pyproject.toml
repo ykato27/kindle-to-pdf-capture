@@ -1,0 +1,17 @@
+[project]
+name = "kindle-capture"
+version = "0.1.0"
+description = "Capture Kindle for PC pages as screenshots and combine into a PDF"
+authors = [{name = "Kindle Capture"}]
+requires-python = ">=3.10"
+dependencies = [
+    "pyautogui",
+    "pillow",
+]
+
+[project.scripts]
+kindle-capture = "kindle_capture.cli:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
