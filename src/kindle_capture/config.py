@@ -1,75 +1,152 @@
-"""Configuration helpers for Kindle capture sessions."""
+"""Settings for one capture session, collected interactively."""
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, TypeVar
+
+OUTPUT_ROOT = Path.home() / "kindle_capture"
+
+# 次のページへ進む向き。横書きの本は右、縦書き（右開き）の本は左
+DIRECTIONS = {"R": "right", "L": "left"}
+# ページ送りの方法。クリックはキーが効かない環境向けの予備
+NAVIGATIONS = {"K": "key", "C": "click"}
+MAX_SECONDS = 60
+MAX_PAGES = 9999  # 画像のファイル名は4桁の連番
+MAX_NAME_BYTES = 200  # フォルダ名・ファイル名の上限（255バイト）に拡張子の分を残す
 
 
-PAGE_NAVIGATION_CHOICES = {
-    "R": "click_right",
-    "L": "click_left",
+@dataclass(frozen=True)
+class PdfQuality:
+    """PDF に入れる画像の縮小と圧縮の度合い."""
+
+    max_height: int | None  # ページ画像の高さの上限（px）。None は縮小しない
+    jpeg_quality: int
+
+
+QUALITIES = {
+    "S": PdfQuality(max_height=1200, jpeg_quality=60),  # 標準: 元の約1/3の容量
+    "L": PdfQuality(max_height=900, jpeg_quality=50),  # 軽量
+    "H": PdfQuality(max_height=None, jpeg_quality=75),  # 高画質: 撮影した解像度のまま
 }
 
 
-def _prompt(text: str, default: str | None = None) -> str:
-    suffix = f" [{default}]" if default is not None else ""
-    response = input(f"{text}{suffix}: ").strip()
-    return response or (default or "")
+@dataclass(frozen=True)
+class CaptureConfig:
+    book_name: str
+    max_pages: int = 1000
+    direction: str = "right"
+    navigation: str = "key"
+    capture_interval: float = 0.5
+    page_change_interval: float = 1.0
+    quality: PdfQuality = field(default_factory=lambda: QUALITIES["S"])
+    output_root: Path = OUTPUT_ROOT
+
+    @property
+    def book_dir(self) -> Path:
+        return self.output_root / sanitize_book_name(self.book_name)
+
+    @property
+    def images_dir(self) -> Path:
+        return self.book_dir / "images"
+
+    @property
+    def output_pdf(self) -> Path:
+        return self.book_dir / f"{sanitize_book_name(self.book_name)}.pdf"
 
 
-def _sanitize_book_name(book_name: str) -> str:
-    sanitized = "_".join(book_name.split())
+def sanitize_book_name(book_name: str) -> str:
+    """A single folder name: no path separators, no leading/trailing dots."""
+
+    sanitized = "_".join(book_name.replace("/", " ").replace("\\", " ").split()).strip(".")
+    sanitized = sanitized.encode("utf-8")[:MAX_NAME_BYTES].decode("utf-8", "ignore")
     return sanitized or "book"
 
 
-def get_config_from_user() -> dict:
-    """Collect configuration interactively from the user.
+T = TypeVar("T")
 
-    Returns a dictionary containing all configuration values required by the
-    capture and PDF generation routines.
-    """
 
-    book_name = _prompt("Enter book name", default="MyBook")
+def _ask(text: str, default: str, parse: Callable[[str], T]) -> T:
+    """Prompt until `parse` accepts the answer (it raises ValueError to reject)."""
 
-    total_pages_input = _prompt("How many pages to capture?", default="1")
-    while not total_pages_input.isdigit() or int(total_pages_input) <= 0:
-        print("Please enter a positive integer for the page count.")
-        total_pages_input = _prompt("How many pages to capture?", default="1")
-    total_pages = int(total_pages_input)
+    while True:
+        answer = input(f"{text} [{default}]: ").strip() or default
+        try:
+            return parse(answer)
+        except ValueError as exc:
+            print(f"  入力を確認してください: {exc}")
 
-    print("Select page navigation method: R (Click Right side), L (Click Left side)")
-    page_nav_choice = _prompt("Choose navigation method", default="R").upper()
-    while page_nav_choice not in PAGE_NAVIGATION_CHOICES:
-        print("Invalid choice. Please select R or L.")
-        page_nav_choice = _prompt("Choose navigation method", default="R").upper()
-    page_navigation = PAGE_NAVIGATION_CHOICES[page_nav_choice]
 
-    capture_interval_input = _prompt(
-        "Delay after screenshot in seconds", default="0.5"
-    )
-    page_change_interval_input = _prompt(
-        "Delay after page change in seconds", default="1.0"
-    )
+def _choice(options: dict[str, T]) -> Callable[[str], T]:
+    def parse(answer: str) -> T:
+        key = answer.upper()
+        if key not in options:
+            raise ValueError(f"{' / '.join(options)} のいずれかを入力してください")
+        return options[key]
+
+    return parse
+
+
+def _positive_int(answer: str) -> int:
     try:
-        capture_interval = float(capture_interval_input)
+        value = int(answer)
     except ValueError:
-        capture_interval = 0.5
+        raise ValueError("整数を入力してください") from None
+    if not 1 <= value <= MAX_PAGES:
+        raise ValueError(f"1〜{MAX_PAGES} の整数を入力してください")
+    return value
+
+
+def _seconds(answer: str) -> float:
     try:
-        page_change_interval = float(page_change_interval_input)
+        value = float(answer)
     except ValueError:
-        page_change_interval = 1.0
+        raise ValueError("秒数を数字で入力してください") from None
+    if not math.isfinite(value) or not 0 <= value <= MAX_SECONDS:
+        raise ValueError(f"0〜{MAX_SECONDS} の秒数を入力してください")
+    return value
 
-    base_output = Path.home() / "kindle_capture"
-    book_dir = base_output / _sanitize_book_name(book_name)
-    images_dir = book_dir / "images"
-    output_pdf = book_dir / f"{_sanitize_book_name(book_name)}.pdf"
 
-    return {
-        "book_name": book_name,
-        "total_pages": total_pages,
-        "page_navigation": page_navigation,
-        "images_dir": images_dir,
-        "output_pdf": output_pdf,
-        "capture_interval": capture_interval,
-        "page_change_interval": page_change_interval,
-    }
+def prompt_book_name() -> str:
+    return _ask("書籍名（保存フォルダとPDFの名前になります）", "MyBook", str)
+
+
+def prompt_existing_images(count: int) -> str:
+    """What to do with images left from a previous run: "pdf", "capture" or "cancel"."""
+
+    return _ask(
+        f"前回撮影した画像が {count} 枚あります。"
+        "P=この画像からPDFだけ作る / N=消して撮り直す / Q=中止",
+        "P",
+        _choice({"P": "pdf", "N": "capture", "Q": "cancel"}),
+    )
+
+
+def prompt_capture_settings() -> dict:
+    return dict(
+        max_pages=_ask(
+            "最大ページ数（本の終わりは自動で検出して止まります）", "1000", _positive_int
+        ),
+        direction=_ask(
+            "ページを進める向き R=右（横書きの本） / L=左（縦書きの本）",
+            "R",
+            _choice(DIRECTIONS),
+        ),
+        navigation=_ask(
+            "ページ送りの方法 K=矢印キー / C=画面の端をクリック",
+            "K",
+            _choice(NAVIGATIONS),
+        ),
+        capture_interval=_ask("撮影してからページを送るまでの秒数", "0.5", _seconds),
+        page_change_interval=_ask("ページを送ってから撮影するまでの秒数", "1.0", _seconds),
+    )
+
+
+def prompt_quality() -> PdfQuality:
+    return _ask(
+        "PDFの画質 S=標準 / L=軽量 / H=高画質（容量は約3倍）",
+        "S",
+        _choice(QUALITIES),
+    )
