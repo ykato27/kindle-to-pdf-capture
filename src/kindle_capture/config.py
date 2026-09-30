@@ -14,6 +14,8 @@ DIRECTIONS = {"R": "right", "L": "left"}
 # ページ送りの方法。クリックはキーが効かない環境向けの予備
 NAVIGATIONS = {"K": "key", "C": "click"}
 MAX_SECONDS = 60
+MAX_PAGES = 9999  # 画像のファイル名は4桁の連番
+MAX_NAME_BYTES = 200  # フォルダ名・ファイル名の上限（255バイト）に拡張子の分を残す
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ def sanitize_book_name(book_name: str) -> str:
     """A single folder name: no path separators, no leading/trailing dots."""
 
     sanitized = "_".join(book_name.replace("/", " ").replace("\\", " ").split()).strip(".")
+    sanitized = sanitized.encode("utf-8")[:MAX_NAME_BYTES].decode("utf-8", "ignore")
     return sanitized or "book"
 
 
@@ -91,8 +94,8 @@ def _positive_int(answer: str) -> int:
         value = int(answer)
     except ValueError:
         raise ValueError("整数を入力してください") from None
-    if value <= 0:
-        raise ValueError("1以上の整数を入力してください")
+    if not 1 <= value <= MAX_PAGES:
+        raise ValueError(f"1〜{MAX_PAGES} の整数を入力してください")
     return value
 
 

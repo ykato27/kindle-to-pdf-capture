@@ -1,4 +1,4 @@
-from PIL import ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from kindle_capture import capture
 
@@ -40,16 +40,26 @@ def test_stops_when_the_screen_flickers_between_two_states(tmp_path, stop):
     assert screen.turns == 3
 
 
+def saved_sources(result, pages):
+    """Index of the source page each saved image shows."""
+
+    found = []
+    for path in result.pages:
+        saved = Image.open(path).convert("RGB")
+        found.append(next(i for i, page in enumerate(pages) if ImageChops.difference(saved, page).getbbox() is None))
+    return found
+
+
 def test_slow_page_render_does_not_lose_pages(tmp_path, stop):
+    # ページ送りの後、3回撮るまで前のページが写ったままになる描画の遅れ
     pages = [make_page(i) for i in range(4)]
     config = make_config(tmp_path)
-    screen = FakeScreen(pages, lag=capture.RECHECKS)
+    screen = FakeScreen(pages, lag=3)
 
     result = capture.capture_book(config, screen.screenshot, screen.turn_page, stop)
 
     assert result.reason == "end_of_book"
-    assert len(result.pages) == 4
-    assert screen.turns == 3 + capture.STALL_LIMIT
+    assert saved_sources(result, pages) == [0, 1, 2, 3]
 
 
 def test_page_that_repeats_an_earlier_one_is_kept_when_the_book_goes_on(tmp_path, stop):
@@ -185,3 +195,76 @@ def test_blank_tiny_title_blank_does_not_end_the_book(tmp_path, stop):
 
     assert result.reason == "end_of_book"
     assert len(result.pages) == 5
+
+
+def test_max_pages_is_not_exceeded_by_a_provisional_frame(tmp_path, stop):
+    blank = make_page(99)
+    pages = [make_page(1), blank, blank.copy(), make_page(2), make_page(3)]
+    config = make_config(tmp_path, max_pages=3)
+
+    class Stuck(FakeScreen):
+        # 白紙で1回だけページ送りが効かない
+        def turn_page(self):
+            self.turns += 1
+            if self.turns != 2:
+                self.index = min(self.index + 1, len(self.pages) - 1)
+
+    screen = Stuck([pages[0], pages[1], pages[3], pages[4]])
+
+    result = capture.capture_book(config, screen.screenshot, screen.turn_page, stop)
+
+    assert result.reason == "max_pages"
+    assert len(result.pages) == 3
+    assert saved_names(config) == ["page_0001.png", "page_0002.png", "page_0003.png"]
+
+
+def test_failed_save_leaves_neither_the_page_nor_a_partial_file(tmp_path, stop, monkeypatch):
+    config = make_config(tmp_path)
+    screen = FakeScreen([make_page(i) for i in range(10)])
+    real_save = capture._save
+
+    def save(image, path):
+        if path.name == "page_0003.png":
+            image.save(path.with_suffix(".tmp"), "PNG")
+            raise OSError("disk full")
+        real_save(image, path)
+
+    monkeypatch.setattr(capture, "_save", save)
+
+    result = capture.capture_book(config, screen.screenshot, screen.turn_page, stop)
+
+    assert result.reason == "error"
+    assert [p.name for p in result.pages] == ["page_0001.png", "page_0002.png"]
+    assert "page_0003.png" not in saved_names(config)
+
+
+def stuck_after_two_pages():
+    return FakeScreen([make_page(1), make_page(2)])
+
+
+def test_focus_lost_after_a_stall_drops_the_duplicate(tmp_path, stop):
+    config = make_config(tmp_path)
+    screen = stuck_after_two_pages()
+
+    def ready():
+        return screen.turns < 3  # 重複を仮保存した直後、ページを送る前に前面が変わる
+
+    result = capture.capture_book(config, screen.screenshot, screen.turn_page, stop, ready)
+
+    assert result.reason == "focus_lost"
+    assert saved_names(config) == ["page_0001.png", "page_0002.png"]
+
+
+def test_error_after_a_stall_drops_the_duplicate(tmp_path, stop):
+    config = make_config(tmp_path)
+    screen = stuck_after_two_pages()
+
+    def turn_page():
+        if screen.turns == 2:  # 重複を仮保存した後のページ送りで失敗する
+            raise RuntimeError("boom")
+        screen.turn_page()
+
+    result = capture.capture_book(config, screen.screenshot, turn_page, stop)
+
+    assert result.reason == "error"
+    assert saved_names(config) == ["page_0001.png", "page_0002.png"]

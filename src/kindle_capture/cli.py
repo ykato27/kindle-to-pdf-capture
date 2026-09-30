@@ -21,7 +21,8 @@ def _check_permissions() -> bool:
     if required:
         print(
             f"このターミナルに「{'」「'.join(required)}」の許可がありません。"
-            "システム設定 > プライバシーとセキュリティ で許可し、ターミナルを開き直してから実行してください。"
+            "システム設定 > プライバシーとセキュリティ で許可し（一覧に無ければ＋で追加し）、"
+            "ターミナルを開き直してから実行してください。"
         )
         return False
     if optional:
@@ -33,14 +34,15 @@ def _check_permissions() -> bool:
 
 
 def main() -> int:
-    if not _check_permissions():
-        return 1
     try:
         book_name = config.prompt_book_name()
         settings = config.CaptureConfig(book_name, output_root=config.OUTPUT_ROOT)
         existing = capture.list_pages(settings.images_dir)
         action = config.prompt_existing_images(len(existing)) if existing else "capture"
         if action == "cancel":
+            return 1
+        # PDF だけ作り直すときは画面もキーも使わないので、許可は確かめない
+        if action == "capture" and not _check_permissions():
             return 1
         capture_settings = config.prompt_capture_settings() if action == "capture" else {}
         settings = config.CaptureConfig(
@@ -73,9 +75,10 @@ def main() -> int:
         return 1
     try:
         pdf.images_to_pdf(pages, settings.output_pdf, settings.quality)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, OSError) as exc:
+        reason = "中断しました" if isinstance(exc, KeyboardInterrupt) else f"作れませんでした: {exc}"
         print(
-            "\nPDF の作成を中断しました。撮影した画像は残っています。"
+            f"\nPDF の作成を{reason}。撮影した画像は残っています。"
             "同じ書籍名で起動し「P=この画像からPDFだけ作る」を選ぶと作り直せます。"
         )
         return 1

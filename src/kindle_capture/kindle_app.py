@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -78,25 +79,42 @@ def _capture_window(window_id: int) -> Image.Image:
         if result.returncode != 0 or not path.exists():
             raise RuntimeError(f"Kindle のウィンドウを撮影できませんでした: {result.stderr.strip()}")
         with Image.open(path) as image:
-            return image.convert("RGB")
+            if "A" not in image.getbands():
+                return image.convert("RGB")
+            # ウィンドウ表示では角の丸い部分が透明になるので、黒ではなく白で埋める
+            page = Image.new("RGB", image.size, "white")
+            page.paste(image, mask=image.getchannel("A"))
+            return page
 
 
-def make_screenshotter() -> Callable[[], Image.Image]:
-    """Pick the capture method once, so every page is taken the same way."""
+def make_screenshotter(attempts: int = 6, interval: float = 0.5) -> Callable[[], Image.Image]:
+    """Capture the Kindle window on macOS, the whole primary screen elsewhere.
 
-    if find_window() is not None:
-        def capture_kindle_window() -> Image.Image:
-            found = find_window()
-            if found is None:
-                raise RuntimeError("Kindle のウィンドウが見つからなくなりました。")
-            return _capture_window(found[0])
+    macOS never falls back to the whole screen: other windows would change
+    every frame and the end of the book would never be detected.
+    """
 
-        return capture_kindle_window
+    if not IS_MAC:
+        import pyautogui
 
-    import pyautogui
+        return lambda: pyautogui.screenshot().convert("RGB")
 
-    print("Kindle のウィンドウが見つからないため、画面全体を撮影します。")
-    return lambda: pyautogui.screenshot().convert("RGB")
+    for _ in range(attempts):
+        if find_window() is not None:
+            break
+        time.sleep(interval)
+    else:
+        raise RuntimeError(
+            "Kindle のウィンドウが画面上にありません。最小化や別のデスクトップになっていないか確かめてください。"
+        )
+
+    def capture_kindle_window() -> Image.Image:
+        found = find_window()
+        if found is None:
+            raise RuntimeError("Kindle のウィンドウが見つからなくなりました。")
+        return _capture_window(found[0])
+
+    return capture_kindle_window
 
 
 def make_page_turner(navigation: str, direction: str) -> Callable[[], None]:
@@ -120,24 +138,31 @@ def make_page_turner(navigation: str, direction: str) -> Callable[[], None]:
     return click_edge
 
 
+_PERMISSIONS = (  # (確認する関数, 求める関数, 表示名, 撮影に必須か)
+    ("CGPreflightScreenCaptureAccess", "CGRequestScreenCaptureAccess", "画面収録", True),
+    ("CGPreflightPostEventAccess", "CGRequestPostEventAccess", "アクセシビリティ", True),
+    ("CGPreflightListenEventAccess", "CGRequestListenEventAccess", "入力監視", False),
+)
+
+
 def missing_permissions() -> tuple[list[str], list[str]]:
-    """Missing macOS permissions: (needed to capture at all, needed only for Esc)."""
+    """Missing macOS permissions: (needed to capture at all, needed only for Esc).
+
+    For each missing one the system dialog is requested once, which also puts
+    the terminal app into the list in System Settings.
+    """
 
     if not IS_MAC:
         return [], []
     import Quartz
 
-    def granted(check_name: str) -> bool:
+    required, optional = [], []
+    for check_name, request_name, label, is_required in _PERMISSIONS:
         check = getattr(Quartz, check_name, None)
-        return True if check is None else bool(check())
-
-    required = [
-        label
-        for check_name, label in (
-            ("CGPreflightScreenCaptureAccess", "画面収録"),
-            ("CGPreflightPostEventAccess", "アクセシビリティ"),
-        )
-        if not granted(check_name)
-    ]
-    optional = [] if granted("CGPreflightListenEventAccess") else ["入力監視"]
+        if check is None or check():
+            continue
+        request = getattr(Quartz, request_name, None)
+        if request is not None:
+            request()
+        (required if is_required else optional).append(label)
     return required, optional

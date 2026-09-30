@@ -22,7 +22,7 @@ def test_seconds_accept_normal_values():
     assert config._seconds("1.5") == 1.5
 
 
-@pytest.mark.parametrize("answer", ["0", "-3", "1.5", "abc"])
+@pytest.mark.parametrize("answer", ["0", "-3", "1.5", "abc", "10000"])
 def test_page_count_rejects_non_positive_integers(answer):
     with pytest.raises(ValueError):
         config._positive_int(answer)
@@ -34,3 +34,9 @@ def test_prompt_repeats_until_the_answer_is_valid(monkeypatch, capsys):
 
     assert config.prompt_quality() == config.QUALITIES["L"]
     assert "のいずれかを入力してください" in capsys.readouterr().out
+
+
+def test_long_book_name_fits_in_a_file_name():
+    name = config.sanitize_book_name("長" * 300)
+    assert len(name.encode("utf-8")) <= config.MAX_NAME_BYTES
+    assert name == "長" * (config.MAX_NAME_BYTES // 3)

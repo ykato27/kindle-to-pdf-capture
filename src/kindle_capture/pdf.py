@@ -18,8 +18,11 @@ from .config import PdfQuality
 
 
 def _page_jpeg(path: Path, quality: PdfQuality) -> tuple[bytes, int, int]:
-    with Image.open(path) as image:
-        page = image.convert("RGB")
+    try:
+        with Image.open(path) as image:
+            page = image.convert("RGB")
+    except OSError as exc:
+        raise OSError(f"{path.name} を読めません（{exc}）") from exc
     if quality.max_height is not None and page.height > quality.max_height:
         width = max(1, round(page.width * quality.max_height / page.height))
         page = page.resize((width, quality.max_height), Image.Resampling.LANCZOS)

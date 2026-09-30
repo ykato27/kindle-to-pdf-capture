@@ -100,17 +100,21 @@ def capture_book(
             if stop.is_set():
                 break  # 停止した後に撮った1枚は保存しない
 
+            seen = seen_recently(fingerprint)
+            if not seen:
+                stalled.clear()  # 新しいページが来たので、仮保存した分は本物のページとして残す
+                if len(pages) >= config.max_pages:
+                    return finish("max_pages")
             path = config.images_dir / f"page_{len(pages) + 1:04d}.png"
             _save(image, path)
             pages.append(path)
 
-            if seen_recently(fingerprint):
+            if seen:
                 stalled.append(path)
                 print(f"ページが進んでいません（{len(stalled)}/{STALL_LIMIT}）: {path.name}")
                 if len(stalled) >= STALL_LIMIT:
                     return finish("end_of_book")
             else:
-                stalled.clear()
                 recent.append(fingerprint)
                 print(f"撮影 {len(pages)}/{config.max_pages}: {path.name}")
                 if len(pages) >= config.max_pages:
@@ -152,6 +156,9 @@ def run(config: CaptureConfig, stop: threading.Event, countdown: int = 3) -> Cap
         screenshot = kindle_app.make_screenshotter()
     except KeyboardInterrupt:
         return CaptureResult([], "stopped")
+    except RuntimeError as exc:
+        print(exc)
+        return CaptureResult([], "error")
 
     def ready() -> bool:
         pyautogui.failSafeCheck()  # マウスが画面の角にあれば FailSafeException で止まる
