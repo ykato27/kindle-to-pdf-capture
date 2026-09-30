@@ -169,3 +169,19 @@ def test_prepare_folder_removes_previous_pages_and_partial_files(tmp_path):
     capture.prepare_folder(images)
 
     assert sorted(p.name for p in images.iterdir()) == ["note.txt"]
+
+
+def test_blank_tiny_title_blank_does_not_end_the_book(tmp_path, stop):
+    # 白紙 → 1文字だけの扉（白紙との差が約0.01%）→ 白紙 の並びで途中停止しないこと
+    blank = make_page(1)
+    ImageDraw.Draw(blank).rectangle((216, 0, 648, 558), fill="white")
+    title = blank.copy()
+    ImageDraw.Draw(title).rectangle((430, 270, 438, 276), fill="black")
+    pages = [make_page(2), blank, title, blank.copy(), make_page(3)]
+    config = make_config(tmp_path)
+    screen = FakeScreen(pages)
+
+    result = capture.capture_book(config, screen.screenshot, screen.turn_page, stop)
+
+    assert result.reason == "end_of_book"
+    assert len(result.pages) == 5
