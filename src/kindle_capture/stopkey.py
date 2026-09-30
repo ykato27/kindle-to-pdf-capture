@@ -9,7 +9,8 @@ class EscToStop:
     """Set `event` when Esc is pressed anywhere, until the block exits.
 
     On macOS the terminal app needs the Input Monitoring permission
-    (システム設定 > プライバシーとセキュリティ > 入力監視); without it no key is seen.
+    (システム設定 > プライバシーとセキュリティ > 入力監視); without it no key is
+    seen. cli checks that permission before the capture starts.
     """
 
     def __init__(self, event: threading.Event) -> None:
@@ -19,23 +20,17 @@ class EscToStop:
     def __enter__(self) -> "EscToStop":
         try:
             from pynput import keyboard
-        except Exception as exc:  # noqa: BLE001  環境によっては import 時に失敗する
-            print(f"Esc キーでの停止は使えません（{exc}）。マウスを画面の角へ動かすと止まります。")
-            return self
 
-        def on_press(key) -> None:
-            if key == keyboard.Key.esc:
-                self.event.set()
+            def on_press(key) -> None:
+                if key == keyboard.Key.esc:
+                    self.event.set()
 
-        self._listener = keyboard.Listener(on_press=on_press)
-        self._listener.start()
-        self._listener.wait()
-        if getattr(self._listener, "IS_TRUSTED", True) is False:
-            print(
-                "Esc キーを受け取る許可がありません。システム設定 > プライバシーとセキュリティ > "
-                "入力監視 で、このターミナルを許可してください。"
-                "それまではマウスを画面の角へ動かすと止まります。"
-            )
+            self._listener = keyboard.Listener(on_press=on_press)
+            self._listener.start()
+            self._listener.wait()
+        except Exception as exc:  # noqa: BLE001  環境によっては監視を始められない
+            self._listener = None
+            print(f"Esc キーでの停止は使えません（{exc}）。別のアプリに切り替えるか、マウスを画面の角へ動かすと止まります。")
         return self
 
     def __exit__(self, *exc_info) -> None:

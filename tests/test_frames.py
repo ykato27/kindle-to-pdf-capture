@@ -1,4 +1,6 @@
-from PIL import ImageDraw
+import random
+
+from PIL import Image, ImageChops, ImageDraw
 
 from kindle_capture import frames
 
@@ -9,6 +11,15 @@ def test_same_screen_is_same_page():
     a = frames.fingerprint(make_page(1))
     b = frames.fingerprint(make_page(1))
     assert frames.is_same_page(a, b)
+
+
+def test_slight_brightness_noise_is_still_the_same_page():
+    page = make_page(1)
+    rng = random.Random(0)
+    noise = Image.new("L", page.size)
+    noise.putdata([rng.randint(0, 20) for _ in range(page.width * page.height)])
+    noisy = ImageChops.add(page, Image.merge("RGB", [noise] * 3))
+    assert frames.is_same_page(frames.fingerprint(page), frames.fingerprint(noisy))
 
 
 def test_different_text_pages_are_different():

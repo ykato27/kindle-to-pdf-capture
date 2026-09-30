@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -12,6 +13,7 @@ OUTPUT_ROOT = Path.home() / "kindle_capture"
 DIRECTIONS = {"R": "right", "L": "left"}
 # ページ送りの方法。クリックはキーが効かない環境向けの予備
 NAVIGATIONS = {"K": "key", "C": "click"}
+MAX_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -32,12 +34,12 @@ QUALITIES = {
 @dataclass(frozen=True)
 class CaptureConfig:
     book_name: str
-    max_pages: int
-    direction: str
-    navigation: str
-    capture_interval: float
-    page_change_interval: float
-    quality: PdfQuality = QUALITIES["S"]
+    max_pages: int = 1000
+    direction: str = "right"
+    navigation: str = "key"
+    capture_interval: float = 0.5
+    page_change_interval: float = 1.0
+    quality: PdfQuality = field(default_factory=lambda: QUALITIES["S"])
     output_root: Path = OUTPUT_ROOT
 
     @property
@@ -54,7 +56,9 @@ class CaptureConfig:
 
 
 def sanitize_book_name(book_name: str) -> str:
-    sanitized = "_".join(book_name.replace("/", " ").split())
+    """A single folder name: no path separators, no leading/trailing dots."""
+
+    sanitized = "_".join(book_name.replace("/", " ").replace("\\", " ").split()).strip(".")
     return sanitized or "book"
 
 
@@ -83,24 +87,42 @@ def _choice(options: dict[str, T]) -> Callable[[str], T]:
 
 
 def _positive_int(answer: str) -> int:
-    value = int(answer)
+    try:
+        value = int(answer)
+    except ValueError:
+        raise ValueError("整数を入力してください") from None
     if value <= 0:
         raise ValueError("1以上の整数を入力してください")
     return value
 
 
-def _non_negative_float(answer: str) -> float:
-    value = float(answer)
-    if value < 0:
-        raise ValueError("0以上の数を入力してください")
+def _seconds(answer: str) -> float:
+    try:
+        value = float(answer)
+    except ValueError:
+        raise ValueError("秒数を数字で入力してください") from None
+    if not math.isfinite(value) or not 0 <= value <= MAX_SECONDS:
+        raise ValueError(f"0〜{MAX_SECONDS} の秒数を入力してください")
     return value
 
 
-def prompt_config() -> CaptureConfig:
-    """Ask the user for every setting and return a validated config."""
+def prompt_book_name() -> str:
+    return _ask("書籍名（保存フォルダとPDFの名前になります）", "MyBook", str)
 
-    return CaptureConfig(
-        book_name=_ask("書籍名（保存フォルダとPDFの名前になります）", "MyBook", str),
+
+def prompt_existing_images(count: int) -> str:
+    """What to do with images left from a previous run: "pdf", "capture" or "cancel"."""
+
+    return _ask(
+        f"前回撮影した画像が {count} 枚あります。"
+        "P=この画像からPDFだけ作る / N=消して撮り直す / Q=中止",
+        "P",
+        _choice({"P": "pdf", "N": "capture", "Q": "cancel"}),
+    )
+
+
+def prompt_capture_settings() -> dict:
+    return dict(
         max_pages=_ask(
             "最大ページ数（本の終わりは自動で検出して止まります）", "1000", _positive_int
         ),
@@ -114,11 +136,14 @@ def prompt_config() -> CaptureConfig:
             "K",
             _choice(NAVIGATIONS),
         ),
-        capture_interval=_ask("撮影してからページを送るまでの秒数", "0.5", _non_negative_float),
-        page_change_interval=_ask("ページを送ってから撮影するまでの秒数", "1.0", _non_negative_float),
-        quality=_ask(
-            "PDFの画質 S=標準 / L=軽量 / H=高画質（容量は約3倍）",
-            "S",
-            _choice(QUALITIES),
-        ),
+        capture_interval=_ask("撮影してからページを送るまでの秒数", "0.5", _seconds),
+        page_change_interval=_ask("ページを送ってから撮影するまでの秒数", "1.0", _seconds),
+    )
+
+
+def prompt_quality() -> PdfQuality:
+    return _ask(
+        "PDFの画質 S=標準 / L=軽量 / H=高画質（容量は約3倍）",
+        "S",
+        _choice(QUALITIES),
     )

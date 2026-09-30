@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -12,7 +10,7 @@ from typing import Callable
 
 from PIL import Image
 
-from . import frames
+from . import frames, kindle_app
 from .config import CaptureConfig
 
 # 直近に保存したこの枚数のページのどれかと同じ画面を「進まなかった」とみなす。
@@ -20,22 +18,33 @@ from .config import CaptureConfig
 RECENT_PAGES = 2
 # ページが進まなかった回数がこれだけ続いたら本の終わりとみなす（同じ画面が3枚続いた状態）
 STALL_LIMIT = 2
-
-KINDLE_APP_NAME = "Amazon Kindle"
+# 同じ画面だったとき、描画の遅れを考えて撮り直す回数（間隔はページ送り後の待ち秒数）
+RECHECKS = 3
 
 
 @dataclass
 class CaptureResult:
     pages: list[Path]
-    reason: str  # "end_of_book" / "max_pages" / "stopped" / "focus_lost"
+    reason: str  # "end_of_book" / "max_pages" / "stopped" / "focus_lost" / "error"
+
+
+def list_pages(images_dir: Path) -> list[Path]:
+    return sorted(images_dir.glob("page_*.png"))
 
 
 def prepare_folder(images_dir: Path) -> None:
     """Create the target directory and remove images left by a previous run."""
 
     images_dir.mkdir(parents=True, exist_ok=True)
-    for path in images_dir.glob("page_*.png"):
+    for path in [*list_pages(images_dir), *images_dir.glob("page_*.tmp")]:
         path.unlink(missing_ok=True)
+
+
+def _save(image: Image.Image, path: Path) -> None:
+    # 保存の途中で止めても書きかけの PNG が残らないよう、別名で書いてから置き換える
+    tmp = path.with_suffix(".tmp")
+    image.convert("RGB").save(tmp, "PNG")
+    tmp.replace(path)
 
 
 def capture_book(
@@ -43,17 +52,20 @@ def capture_book(
     screenshot: Callable[[], Image.Image],
     turn_page: Callable[[], None],
     stop: threading.Event,
-    kindle_in_front: Callable[[], bool] = lambda: True,
+    ready: Callable[[], bool] = lambda: True,
+    stop_exceptions: tuple[type[BaseException], ...] = (),
 ) -> CaptureResult:
-    """Capture pages until the screen stops changing, the page limit, or `stop`.
+    """Capture pages until the screen stops changing, the page limit, or a stop.
 
-    Every screenshot and page turn first checks `kindle_in_front`, so that a
-    switch to another app never sends keys to it or saves its screen as a page.
+    `ready` is checked before every screenshot and page turn; when it returns
+    False (Kindle is no longer in front) the capture ends, so keys are never
+    sent to another app. Exceptions in `stop_exceptions` and Ctrl+C end the
+    capture like the Esc key does.
 
     A frame that matches a recently saved page is saved provisionally: it may
     be a real page that looks almost the same (a blank page, a short title).
-    Only when STALL_LIMIT such frames come in a row are they deleted and the
-    book treated as finished.
+    It is kept once a new page follows, and deleted when the capture ends on
+    it, so the result never ends with repeated frames.
     """
 
     pages: list[Path] = []
@@ -63,91 +75,65 @@ def capture_book(
     def seen_recently(fingerprint: Image.Image) -> bool:
         return any(frames.is_same_page(fingerprint, page) for page in recent)
 
-    while not stop.is_set():
-        if not kindle_in_front():
-            return CaptureResult(pages, "focus_lost")
-        image = screenshot()
-        fingerprint = frames.fingerprint(image)
-        if seen_recently(fingerprint):
-            # 描画が遅れているだけかもしれないので、もう一度待って撮り直す
-            if stop.wait(config.page_change_interval):
-                break
-            if not kindle_in_front():
-                return CaptureResult(pages, "focus_lost")
+    def finish(reason: str) -> CaptureResult:
+        for duplicate in stalled:
+            duplicate.unlink(missing_ok=True)
+            pages.remove(duplicate)
+        return CaptureResult(pages, reason)
+
+    try:
+        while not stop.is_set():
+            if not ready():
+                return finish("focus_lost")
             image = screenshot()
             fingerprint = frames.fingerprint(image)
-        if stop.is_set():
-            break  # 停止キーで画面が切り替わった後の1枚は保存しない
+            for _ in range(RECHECKS):
+                if not seen_recently(fingerprint):
+                    break
+                # 描画が遅れているだけかもしれないので、待って撮り直す
+                if stop.wait(config.page_change_interval):
+                    return finish("stopped")
+                if not ready():
+                    return finish("focus_lost")
+                image = screenshot()
+                fingerprint = frames.fingerprint(image)
+            if stop.is_set():
+                break  # 停止した後に撮った1枚は保存しない
 
-        path = config.images_dir / f"page_{len(pages) + 1:04d}.png"
-        image.convert("RGB").save(path)
-        pages.append(path)
+            path = config.images_dir / f"page_{len(pages) + 1:04d}.png"
+            _save(image, path)
+            pages.append(path)
 
-        if seen_recently(fingerprint):
-            stalled.append(path)
-            print(f"ページが進んでいません（{len(stalled)}/{STALL_LIMIT}）: {path.name}")
-            if len(stalled) >= STALL_LIMIT:
-                for duplicate in stalled:
-                    duplicate.unlink(missing_ok=True)
-                    pages.remove(duplicate)
-                return CaptureResult(pages, "end_of_book")
-        else:
-            stalled.clear()
-            recent.append(fingerprint)
-            print(f"撮影 {len(pages)}/{config.max_pages}: {path.name}")
+            if seen_recently(fingerprint):
+                stalled.append(path)
+                print(f"ページが進んでいません（{len(stalled)}/{STALL_LIMIT}）: {path.name}")
+                if len(stalled) >= STALL_LIMIT:
+                    return finish("end_of_book")
+            else:
+                stalled.clear()
+                recent.append(fingerprint)
+                print(f"撮影 {len(pages)}/{config.max_pages}: {path.name}")
+                if len(pages) >= config.max_pages:
+                    return finish("max_pages")
 
-        if len(pages) >= config.max_pages:
-            return CaptureResult(pages, "max_pages")
-        if stop.wait(config.capture_interval):
-            break
-        if not kindle_in_front():
-            return CaptureResult(pages, "focus_lost")
-        turn_page()
-        if stop.wait(config.page_change_interval):
-            break
+            if stop.wait(config.capture_interval):
+                break
+            if not ready():
+                return finish("focus_lost")
+            turn_page()
+            if stop.wait(config.page_change_interval):
+                break
+    except (KeyboardInterrupt, *stop_exceptions):
+        return finish("stopped")
+    except Exception as exc:  # noqa: BLE001  撮れた分は PDF にするため、落とさずに返す
+        print(f"撮影中にエラーが起きました: {exc}")
+        return finish("error")
 
-    return CaptureResult(pages, "stopped")
-
-
-def activate_kindle() -> None:
-    """Bring Kindle for Mac to the front so that key presses reach it."""
-
-    if sys.platform != "darwin":
-        return
-    result = subprocess.run(
-        ["open", "-a", KINDLE_APP_NAME], capture_output=True, check=False
-    )
-    if result.returncode != 0:
-        print(f"{KINDLE_APP_NAME} を前面に出せませんでした。手動で Kindle を前面にしてください。")
-
-
-def kindle_is_front() -> bool:
-    """Whether Kindle for Mac is the frontmost app (always True on other platforms)."""
-
-    if sys.platform != "darwin":
-        return True
-    front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()
-    info = subprocess.run(
-        ["lsappinfo", "info", "-only", "name", front], capture_output=True, text=True
-    ).stdout
-    return '"Kindle"' in info
-
-
-def make_page_turner(navigation: str, direction: str) -> Callable[[], None]:
-    import pyautogui
-
-    if navigation == "key":
-        return lambda: pyautogui.press(direction)
-
-    # 本文の上をクリックするとツールバーの表示切り替えや文字の選択になるため、画面の端を押す
-    width, height = pyautogui.size()
-    x = round(width * (0.97 if direction == "right" else 0.03))
-    y = height // 2
-    return lambda: pyautogui.click(x, y)
+    return finish("stopped")
 
 
 def run(config: CaptureConfig, stop: threading.Event, countdown: int = 3) -> CaptureResult:
-    """Capture with the real screen, keyboard and mouse.
+    """Capture with the real Kindle window, keyboard and mouse.
 
     Moving the mouse to a screen corner (pyautogui's fail-safe) or Ctrl+C
     also stops the capture; the pages taken so far are kept.
@@ -156,19 +142,26 @@ def run(config: CaptureConfig, stop: threading.Event, countdown: int = 3) -> Cap
     import pyautogui
 
     pyautogui.FAILSAFE = True
-    prepare_folder(config.images_dir)
-    turn_page = make_page_turner(config.navigation, config.direction)
-
-    activate_kindle()
-    print("Kindle で最初のページを表示しておいてください。Esc キーで撮影を止められます。")
-    for remaining in range(countdown, 0, -1):
-        print(f"{remaining} 秒後に撮影を始めます...")
-        if stop.wait(1):
-            return CaptureResult([], "stopped")
-
-    result = CaptureResult([], "stopped")
     try:
-        result = capture_book(config, pyautogui.screenshot, turn_page, stop, kindle_is_front)
-    except (KeyboardInterrupt, pyautogui.FailSafeException):
-        result = CaptureResult(sorted(config.images_dir.glob("page_*.png")), "stopped")
-    return result
+        kindle_app.activate()
+        print("Kindle で最初のページを表示しておいてください。Esc キーで撮影を止められます。")
+        for remaining in range(countdown, 0, -1):
+            print(f"{remaining} 秒後に撮影を始めます...")
+            if stop.wait(1):
+                return CaptureResult([], "stopped")
+        screenshot = kindle_app.make_screenshotter()
+    except KeyboardInterrupt:
+        return CaptureResult([], "stopped")
+
+    def ready() -> bool:
+        pyautogui.failSafeCheck()  # マウスが画面の角にあれば FailSafeException で止まる
+        return kindle_app.is_front()
+
+    return capture_book(
+        config,
+        screenshot,
+        kindle_app.make_page_turner(config.navigation, config.direction),
+        stop,
+        ready,
+        stop_exceptions=(pyautogui.FailSafeException,),
+    )

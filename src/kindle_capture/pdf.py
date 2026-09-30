@@ -1,82 +1,106 @@
-"""Combine captured images into a single, reasonably small PDF."""
+"""Combine captured images into a single, reasonably small PDF.
+
+Each page is shrunk and JPEG-compressed, then embedded as is. The file is
+written in one pass with only one page in memory at a time; Pillow's own PDF
+writer keeps every page in memory, and its append mode rewrites the page list
+on every page, so its size and time grow faster than the page count.
+"""
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
-from typing import Iterable
+from typing import BinaryIO
 
-from PIL import Image, ImageChops
+from PIL import Image
 
 from .config import PdfQuality
 
-_BOX_REDUCE = 8  # 余白の検出は 1/8 に縮めた画像で行う
-_BACKGROUND_TOLERANCE = 16
-_BACKGROUND_LUT = [0] * (_BACKGROUND_TOLERANCE + 1) + [255] * (255 - _BACKGROUND_TOLERANCE)
 
-Box = tuple[int, int, int, int]
-
-
-def _content_box(image: Image.Image) -> Box | None:
-    """Area that differs from the screen background (the left edge color)."""
-
-    small = image.convert("RGB").reduce(_BOX_REDUCE)
-    background = Image.new("RGB", small.size, small.getpixel((0, small.height // 2)))
-    mask = ImageChops.difference(small, background).convert("L").point(_BACKGROUND_LUT)
-    box = mask.getbbox()
-    if box is None:
-        return None
-    left, top, right, bottom = box
-    # 縮小で端が切れないよう、1マス分広げて元の座標に戻す
-    return (
-        max(0, (left - 1) * _BOX_REDUCE),
-        max(0, (top - 1) * _BOX_REDUCE),
-        min(image.width, (right + 1) * _BOX_REDUCE),
-        min(image.height, (bottom + 1) * _BOX_REDUCE),
-    )
-
-
-def common_content_box(image_paths: Iterable[Path]) -> Box | None:
-    """Smallest box that keeps the content of every page, so all pages share one size."""
-
-    union: Box | None = None
-    for path in image_paths:
-        with Image.open(path) as image:
-            box = _content_box(image)
-        if box is None:
-            continue
-        if union is None:
-            union = box
-        else:
-            union = (
-                min(union[0], box[0]),
-                min(union[1], box[1]),
-                max(union[2], box[2]),
-                max(union[3], box[3]),
-            )
-    return union
-
-
-def _prepare_page(image: Image.Image, box: Box | None, quality: PdfQuality) -> Image.Image:
-    page = image.convert("RGB")
-    if box is not None:
-        page = page.crop(box)
+def _page_jpeg(path: Path, quality: PdfQuality) -> tuple[bytes, int, int]:
+    with Image.open(path) as image:
+        page = image.convert("RGB")
     if quality.max_height is not None and page.height > quality.max_height:
         width = max(1, round(page.width * quality.max_height / page.height))
         page = page.resize((width, quality.max_height), Image.Resampling.LANCZOS)
-    return page
+    buffer = io.BytesIO()
+    page.save(buffer, "JPEG", quality=quality.jpeg_quality)
+    return buffer.getvalue(), page.width, page.height
+
+
+class _PdfWriter:
+    """Writes numbered PDF objects and remembers their byte offsets for the xref table."""
+
+    def __init__(self, file: BinaryIO) -> None:
+        self.file = file
+        self.position = 0
+        self.offsets: dict[int, int] = {}
+
+    def write(self, data: bytes) -> None:
+        self.file.write(data)
+        self.position += len(data)
+
+    def object(self, number: int, dictionary: str, stream: bytes | None = None) -> None:
+        self.offsets[number] = self.position
+        self.write(f"{number} 0 obj\n{dictionary}".encode("ascii"))
+        if stream is not None:
+            self.write(b"\nstream\n" + stream + b"\nendstream")
+        self.write(b"\nendobj\n")
+
+    def finish(self, root: int) -> None:
+        size = max(self.offsets) + 1
+        xref = self.position
+        rows = [b"0000000000 65535 f \n"]
+        rows += [f"{self.offsets[number]:010d} 00000 n \n".encode("ascii") for number in range(1, size)]
+        self.write(f"xref\n0 {size}\n".encode("ascii") + b"".join(rows))
+        self.write(
+            f"trailer\n<< /Size {size} /Root {root} 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
+        )
 
 
 def images_to_pdf(image_paths: list[Path], output_pdf: Path, quality: PdfQuality) -> Path:
-    """Write the images as PDF pages, one page in memory at a time."""
+    """Write the images as PDF pages (1 pixel = 1 point)."""
 
     if not image_paths:
         raise FileNotFoundError("PDF にする画像がありません。")
 
-    box = common_content_box(image_paths)
+    print(f"PDF を作成しています（{len(image_paths)} ページ）...")
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    for index, path in enumerate(image_paths):
-        with Image.open(path) as image:
-            page = _prepare_page(image, box, quality)
-        page.save(output_pdf, "PDF", append=index > 0, quality=quality.jpeg_quality)
+    tmp = output_pdf.with_suffix(".pdf.tmp")
+    try:
+        _write(image_paths, tmp, quality)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # 途中で止まったら書きかけのファイルを残さない
+        raise
+    tmp.replace(output_pdf)
     print(f"PDF を保存しました（{len(image_paths)} ページ）: {output_pdf}")
     return output_pdf
+
+
+def _write(image_paths: list[Path], tmp: Path, quality: PdfQuality) -> None:
+    # 番号は 1=カタログ、2=ページ一覧、以降はページごとに 画像・描画命令・ページ の3つ
+    page_numbers = []
+    with open(tmp, "wb") as file:
+        writer = _PdfWriter(file)
+        writer.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        for index, path in enumerate(image_paths):
+            jpeg, width, height = _page_jpeg(path, quality)
+            image_no, content_no, page_no = 3 + 3 * index, 4 + 3 * index, 5 + 3 * index
+            writer.object(
+                image_no,
+                f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
+                f"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {len(jpeg)} >>",
+                jpeg,
+            )
+            content = f"q {width} 0 0 {height} 0 0 cm /Im0 Do Q".encode("ascii")
+            writer.object(content_no, f"<< /Length {len(content)} >>", content)
+            writer.object(
+                page_no,
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+                f"/Resources << /XObject << /Im0 {image_no} 0 R >> >> /Contents {content_no} 0 R >>",
+            )
+            page_numbers.append(page_no)
+        kids = " ".join(f"{number} 0 R" for number in page_numbers)
+        writer.object(2, f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>")
+        writer.object(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        writer.finish(root=1)
